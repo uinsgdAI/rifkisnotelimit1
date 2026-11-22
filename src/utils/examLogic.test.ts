@@ -1,0 +1,431 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  parseAppRoute,
+  buildAppRoutePath,
+  evaluateStudentAnswer,
+  estimateCambridgeGrade,
+  parsePapaCambridgeFilename,
+  parsePaperReference,
+  extractWeakTopicsFromResults,
+  findMatchingSyllabusTopics,
+} from './examLogic';
+import {
+  buildGoogleDocsViewerUrl,
+  FALLBACK_SESSIONS,
+  generateSessionPaperFallback,
+  isAllowedPapaCambridgePdfUrl,
+  parsePapersFromHtml,
+  parseSessionsFromHtml,
+  resolvePdfIframeUrl,
+} from './papacambridge';
+import { SYLLABUS_0580, ALL_SUBTOPICS_0580 } from '../data/syllabus0580';
+import { PRACTICE_QUESTION_BANK } from '../data/practiceBank';
+import { generateMockExamQuestions } from './questionGenerator';
+
+test('parseAppRoute handles root /, exact notes/0580/1/1.16, and other routes', () => {
+  assert.deepEqual(parseAppRoute('/'), {
+    view: 'notes',
+    chapterId: 1,
+    topicId: '1.1',
+  });
+  assert.deepEqual(parseAppRoute('/notes/0580/1/1.16'), {
+    view: 'notes',
+    chapterId: 1,
+    topicId: '1.16',
+  });
+  assert.deepEqual(parseAppRoute('/notes/0580/6/6.5/'), {
+    view: 'notes',
+    chapterId: 6,
+    topicId: '6.5',
+  });
+  assert.deepEqual(parseAppRoute('/past-papers/0580/2024-may-june'), {
+    view: 'past-papers',
+    sessionSlug: '2024-may-june',
+    paperFilename: undefined,
+  });
+  assert.deepEqual(
+    parseAppRoute('/past-papers/0580/2024-may-june', '?paper=0580_s24_qp_42.pdf'),
+    {
+      view: 'past-papers',
+      sessionSlug: '2024-may-june',
+      paperFilename: '0580_s24_qp_42.pdf',
+    }
+  );
+  assert.deepEqual(parseAppRoute('/practice/0580/mock-extended'), {
+    view: 'practice',
+    mode: 'mock-extended',
+    topicId: undefined,
+  });
+});
+
+test('buildAppRoutePath serializes routes cleanly', () => {
+  assert.equal(
+    buildAppRoutePath({ view: 'notes', chapterId: 1, topicId: '1.16' }),
+    '/notes/0580/1/1.16'
+  );
+  assert.equal(
+    buildAppRoutePath({ view: 'past-papers', sessionSlug: '2024-may-june' }),
+    '/past-papers/0580/2024-may-june'
+  );
+  assert.equal(
+    buildAppRoutePath({
+      view: 'past-papers',
+      sessionSlug: '2024-may-june',
+      paperFilename: '0580_s24_qp_42.pdf',
+    }),
+    '/past-papers/0580/2024-may-june?paper=0580_s24_qp_42.pdf'
+  );
+});
+
+test('evaluateStudentAnswer handles currency, fractions, and numeric tolerances', () => {
+  assert.equal(
+    evaluateStudentAnswer('$140.22', {
+      questionType: 'numeric',
+      correctAnswer: '140.22',
+      numericAnswer: 140.22,
+      tolerance: 0.02,
+    }),
+    true
+  );
+  assert.equal(
+    evaluateStudentAnswer('4/11', {
+      questionType: 'text',
+      correctAnswer: '4/11',
+      acceptedAnswers: ['4/11'],
+      numericAnswer: 4 / 11,
+      tolerance: 0.0001,
+    }),
+    true
+  );
+  assert.equal(
+    evaluateStudentAnswer('0.16', {
+      questionType: 'text',
+      correctAnswer: '4/25',
+      acceptedAnswers: ['4/25', '0.16'],
+      numericAnswer: 0.16,
+      tolerance: 0.001,
+    }),
+    true
+  );
+  assert.equal(
+    evaluateStudentAnswer('999', {
+      questionType: 'numeric',
+      correctAnswer: '140.22',
+      numericAnswer: 140.22,
+      tolerance: 0.02,
+    }),
+    false
+  );
+});
+
+test('estimateCambridgeGrade reflects Extended A*-U and Core C-U tiers', () => {
+  assert.equal(estimateCambridgeGrade(90, 100, 'Extended').grade, 'A*');
+  assert.equal(estimateCambridgeGrade(75, 100, 'Extended').grade, 'A');
+  assert.equal(estimateCambridgeGrade(80, 100, 'Core').grade, 'C');
+  assert.equal(estimateCambridgeGrade(10, 100, 'Core').grade, 'U');
+});
+
+test('parsePapaCambridgeFilename classifies QP, MS, ER, GT and Core/Extended papers', () => {
+  const qp = parsePapaCambridgeFilename(
+    '0580_s24_qp_12.pdf',
+    'https://pastpapers.papacambridge.com/directories/CAIE/CAIE-pastpapers/upload/0580_s24_qp_12.pdf',
+    '2024-may-june'
+  );
+  assert.equal(qp.docType, 'QP');
+  assert.equal(qp.paperNumber, '1');
+  assert.equal(qp.variant, '2');
+  assert.equal(qp.tier, 'Core');
+
+  const ms = parsePapaCambridgeFilename(
+    '0580_w23_ms_42.pdf',
+    'https://pastpapers.papacambridge.com/directories/CAIE/CAIE-pastpapers/upload/0580_w23_ms_42.pdf',
+    '2023-oct-nov'
+  );
+  assert.equal(ms.docType, 'MS');
+  assert.equal(ms.paperNumber, '4');
+  assert.equal(ms.tier, 'Extended');
+  const ms2005 = parsePapaCambridgeFilename(
+    '0580_s05_qp_1.pdf',
+    'https://pastpapers.papacambridge.com/directories/CAIE/CAIE-pastpapers/upload/0580_s05_qp_1.pdf',
+    '2005-may-june'
+  );
+  assert.equal(ms2005.docType, 'QP');
+  assert.equal(ms2005.paperNumber, '1');
+  assert.equal(ms2005.variant, '-');
+  assert.equal(ms2005.tier, 'Core');
+});
+
+test('All 9 chapters and 72 syllabus subtopics of 0580 have complete, honest study notes', () => {
+  assert.equal(SYLLABUS_0580.length, 9);
+  assert.equal(ALL_SUBTOPICS_0580.length, 72);
+
+  for (const topic of ALL_SUBTOPICS_0580) {
+    assert.ok(topic.title.length > 0, `Missing title on ${topic.id}`);
+    assert.ok(topic.coursebookRef, `Missing coursebookRef on ${topic.id}`);
+    assert.ok(
+      topic.coursebookRef.unit >= 1 && topic.coursebookRef.unit <= 6,
+      `Invalid Coursebook unit ${topic.coursebookRef.unit} on ${topic.id}`
+    );
+    assert.ok(
+      topic.coursebookRef.chapter >= 1 && topic.coursebookRef.chapter <= 24,
+      `Invalid Coursebook chapter ${topic.coursebookRef.chapter} on ${topic.id}`
+    );
+    assert.ok(
+      topic.coursebookRef.sections.length > 5,
+      `Missing Coursebook sections on ${topic.id}`
+    );
+    assert.ok(
+      topic.coursebookTip && topic.coursebookTip.length > 20,
+      `Missing coursebookTip on ${topic.id}`
+    );
+    assert.ok(
+      topic.fastForward && topic.fastForward.length > 20,
+      `Missing fastForward on ${topic.id}`
+    );
+    assert.ok(topic.bigIdea && topic.bigIdea.length > 20, `Missing bigIdea on ${topic.id}`);
+    assert.ok(
+      topic.stepByStepMethod && topic.stepByStepMethod.length >= 3,
+      `Expected >=3 stepByStepMethod items on ${topic.id}`
+    );
+    assert.ok(
+      topic.comparisonTable &&
+        topic.comparisonTable.headers.length >= 2 &&
+        topic.comparisonTable.rows.length >= 2,
+      `Missing comparisonTable on ${topic.id}`
+    );
+    assert.ok(
+      topic.rapidSummary && topic.rapidSummary.length >= 2,
+      `Expected >=2 rapidSummary rows on ${topic.id}`
+    );
+    assert.ok(topic.coreObjectives.length > 0, `Missing objectives on ${topic.id}`);
+    assert.ok(topic.keyFormulas.length > 0, `Missing keyFormulas on ${topic.id}`);
+    assert.ok(topic.studyNotes.length >= 2, `Expected >=2 studyNotes sections on ${topic.id}`);
+    assert.ok(topic.workedExamples.length >= 2, `Expected >=2 workedExamples on ${topic.id}`);
+    assert.ok(topic.quickCheck.prompt.length > 0, `Missing quickCheck on ${topic.id}`);
+    assert.ok(
+      typeof topic.quickCheck.marks === 'number' && topic.quickCheck.marks >= 1,
+      `Missing quickCheck marks on ${topic.id}`
+    );
+    assert.ok(
+      topic.quickCheck.paperType === 'Calculator' ||
+        topic.quickCheck.paperType === 'Non-Calculator',
+      `Missing quickCheck paperType on ${topic.id}`
+    );
+
+    if (topic.quickCheck.paperCode) {
+      const parsed = parsePaperReference(topic.quickCheck.paperCode);
+      assert.ok(parsed, `Invalid paperCode ${topic.quickCheck.paperCode} on ${topic.id}`);
+      if (topic.tier === 'Extended') {
+        assert.equal(
+          parsed.tier,
+          'Extended',
+          `Extended topic ${topic.id} used Core paper ${topic.quickCheck.paperCode}`
+        );
+      }
+      assert.ok(
+        FALLBACK_SESSIONS.some((s) => s.slug === parsed.sessionSlug),
+        `Session ${parsed.sessionSlug} missing from Past Papers catalog for ${topic.id}`
+      );
+    }
+  }
+
+  // Verify no fabricated paper code on Topic 1.1 and Morrison & Hamshaw textbook alignment details
+  const t11 = ALL_SUBTOPICS_0580.find((t) => t.id === '1.1');
+  assert.ok(t11);
+  assert.equal(t11.quickCheck.paperCode, undefined);
+  assert.equal(t11.coursebookRef?.chapter, 1);
+  assert.match(t11.studyNotes.map((s) => s.body + (s.bullets || []).join(' ')).join(' '), /Natural numbers/i);
+
+  const t19 = ALL_SUBTOPICS_0580.find((t) => t.id === '1.9');
+  assert.ok(t19);
+  assert.equal(t19.coursebookRef?.chapter, 1);
+  assert.match(t19.coursebookRef?.sections ?? '', /1\.7 Rounding numbers/i);
+
+  const t118 = ALL_SUBTOPICS_0580.find((t) => t.id === '1.18');
+  assert.ok(t118);
+  assert.equal(t118.coursebookRef?.chapter, 9);
+  assert.ok(t118.coursebookRef?.editionNote);
+
+  const t212 = ALL_SUBTOPICS_0580.find((t) => t.id === '2.12');
+  assert.ok(t212);
+  assert.match(t212.studyNotes.map((s) => s.body + (s.bullets || []).join(' ')).join(' '), /derived[- ]function/i);
+
+  const t213 = ALL_SUBTOPICS_0580.find((t) => t.id === '2.13');
+  assert.ok(t213);
+  assert.match(t213.studyNotes.map((s) => s.body + (s.bullets || []).join(' ')).join(' '), /domain.*range|range.*domain/i);
+
+  const t96 = ALL_SUBTOPICS_0580.find((t) => t.id === '9.6');
+  assert.ok(t96);
+  assert.match(t96.summary + ' ' + t96.studyNotes.map((s) => s.body).join(' '), /box-and-whisker/i);
+
+  const serializedAll = JSON.stringify(SYLLABUS_0580);
+  assert.equal(/shinglee/i.test(serializedAll), false, 'Should not contain stale Shinglee references');
+  assert.equal(/hodder/i.test(serializedAll), false, 'Should not contain Hodder references');
+});
+
+test('Practice bank questions span all 9 chapters', () => {
+  const chaptersCovered = new Set(PRACTICE_QUESTION_BANK.map((q) => q.chapterId));
+  assert.equal(chaptersCovered.size, 9);
+});
+
+test('extractWeakTopicsFromResults groups missed questions by topic ordered by marks lost', () => {
+  const weak = extractWeakTopicsFromResults(
+    [
+      {
+        question: { chapterId: 4, topicId: '4.6', topicTitle: 'Angles', marks: 2, sourceRef: '0580/11/M/J/24' },
+        isCorrect: false,
+        marksEarned: 0,
+      },
+      {
+        question: { chapterId: 9, topicId: '9.7', topicTitle: 'Histograms', marks: 4, sourceRef: '0580/43/O/N/24' },
+        isCorrect: false,
+        marksEarned: 0,
+      },
+      {
+        question: { chapterId: 1, topicId: '1.16', topicTitle: 'Money', marks: 3, sourceRef: '0580/32/M/J/24' },
+        isCorrect: true,
+        marksEarned: 3,
+      },
+    ],
+    SYLLABUS_0580
+  );
+
+  assert.equal(weak.length, 2);
+  assert.equal(weak[0].topicId, '9.7');
+  assert.equal(weak[0].marksLost, 4);
+  assert.equal(weak[0].chapterTitle, 'Statistics');
+  assert.equal(weak[1].topicId, '4.6');
+  assert.equal(weak[1].marksLost, 2);
+  assert.equal(weak[1].chapterTitle, 'Geometry');
+});
+
+test('findMatchingSyllabusTopics maps polygon and statistic queries to exact 0580 notes', () => {
+  const polyMatches = findMatchingSyllabusTopics('polygon', SYLLABUS_0580);
+  assert.ok(polyMatches.length > 0);
+  assert.ok(polyMatches.some((m) => m.topic.id === '4.6'));
+
+  const statMatches = findMatchingSyllabusTopics('Statistic', SYLLABUS_0580);
+  assert.ok(statMatches.length >= 5);
+  assert.ok(statMatches.every((m) => m.chapterId === 9));
+});
+
+test('PapaCambridge utilities parse HTML sessions/papers, enforce safe PDF URLs, and provide static fallback', () => {
+  assert.ok(FALLBACK_SESSIONS.length >= 15);
+  const fallbackPapers = generateSessionPaperFallback('2024-may-june');
+  assert.ok(fallbackPapers.length >= 26);
+  assert.ok(fallbackPapers.some((p) => p.filename === '0580_s24_qp_42.pdf'));
+  assert.ok(fallbackPapers.some((p) => p.filename === '0580_s24_ms_42.pdf'));
+
+  const sampleSessionHtml = `
+    <a href="https://pastpapers.papacambridge.com/papers/caie/igcse-mathematics-0580-2025-may-june">May June 2025</a>
+    <a href="/papers/caie/igcse-mathematics-0580-syllabus">Syllabus</a>
+  `;
+  const parsedSessions = parseSessionsFromHtml(sampleSessionHtml);
+  assert.equal(parsedSessions.length, 1);
+  assert.equal(parsedSessions[0].slug, '2025-may-june');
+
+  const samplePaperHtml = `
+    <a href="https://pastpapers.papacambridge.com/directories/CAIE/CAIE-pastpapers/upload/0580_s25_qp_22.pdf">QP</a>
+    <a href="https://pastpapers.papacambridge.com/directories/CAIE/CAIE-pastpapers/upload/0695_s25_qp_01.pdf">Other</a>
+    <a href="https://pastpapers.papacambridge.com/directories/CAIE/CAIE-pastpapers/upload/wjec+gcse+spanish.pdf">Other2</a>
+  `;
+  const parsedPapers = parsePapersFromHtml(samplePaperHtml, '2025-may-june');
+  assert.equal(parsedPapers.length, 1);
+  assert.equal(parsedPapers[0].paperNumber, '2');
+  assert.equal(parsedPapers[0].filename, '0580_s25_qp_22.pdf');
+
+  const nov2002Fallback = generateSessionPaperFallback('2002-nov');
+  assert.ok(nov2002Fallback.some((p) => p.filename === '0580_w02_qp_1.pdf'));
+
+  assert.ok(
+    isAllowedPapaCambridgePdfUrl(
+      'https://pastpapers.papacambridge.com/directories/CAIE/CAIE-pastpapers/upload/0580_s24_qp_12.pdf'
+    )
+  );
+  assert.equal(isAllowedPapaCambridgePdfUrl('https://evil.example.com/test.pdf'), null);
+  assert.equal(isAllowedPapaCambridgePdfUrl('http://pastpapers.papacambridge.com/test.pdf'), null);
+
+  const samplePdf =
+    'https://pastpapers.papacambridge.com/directories/CAIE/CAIE-pastpapers/upload/0580_s19_qp_11.pdf';
+  assert.equal(
+    buildGoogleDocsViewerUrl(samplePdf),
+    `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(samplePdf)}`
+  );
+  assert.equal(
+    resolvePdfIframeUrl(samplePdf, { apiProxyAvailable: true, viewerMode: 'proxy' }),
+    `/api/papacambridge/pdf?url=${encodeURIComponent(samplePdf)}`
+  );
+  assert.equal(
+    resolvePdfIframeUrl(samplePdf, { apiProxyAvailable: false, viewerMode: 'proxy' }),
+    `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(samplePdf)}`
+  );
+  assert.ok(FALLBACK_SESSIONS.some((s) => s.slug === '2002-may-june'));
+  assert.ok(FALLBACK_SESSIONS.some((s) => s.slug === '2002-oct-nov'));
+  assert.ok(FALLBACK_SESSIONS.some((s) => s.slug === '2026-may-june'));
+  const pre2010 = generateSessionPaperFallback('2005-may-june');
+  assert.ok(pre2010.some((p) => p.filename === '0580_s05_qp_1.pdf' && p.variant === '-'));
+  assert.ok(pre2010.some((p) => p.filename === '0580_s05_ms_4.pdf' && p.variant === '-'));
+  assert.ok(pre2010.some((p) => p.filename === '0580_s05_er.pdf'));
+  assert.equal(pre2010.some((p) => p.docType === 'GT'), false);
+
+  assert.equal(
+    resolvePdfIframeUrl(samplePdf, { apiProxyAvailable: true, viewerMode: 'web' }),
+    `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(samplePdf)}`
+  );
+});
+
+test('generateMockExamQuestions generates valid multi-type papers and avoids repeats on retries', () => {
+  const modes = ['mock-core-p1', 'mock-core-p3', 'mock-ext-p2', 'mock-ext-p4', 'mock-full'] as const;
+
+  for (const mode of modes) {
+    const avoid = new Set<string>();
+    const attempt1 = generateMockExamQuestions({ mode, attemptNumber: 1, avoidSignatures: avoid });
+    for (const sig of attempt1.signatures) avoid.add(sig);
+
+    const attempt2 = generateMockExamQuestions({ mode, attemptNumber: 2, avoidSignatures: avoid });
+    for (const sig of attempt2.signatures) avoid.add(sig);
+
+    const attempt3 = generateMockExamQuestions({ mode, attemptNumber: 3, avoidSignatures: avoid });
+
+    assert.ok(attempt1.questions.length >= 8, `Expected >=8 questions for ${mode}`);
+    assert.equal(attempt2.questions.length, attempt1.questions.length);
+    assert.equal(attempt3.questions.length, attempt1.questions.length);
+
+    // Every generated question evaluates its own answer cleanly and MCQs include their exact answer
+    for (const q of [...attempt1.questions, ...attempt2.questions, ...attempt3.questions]) {
+      assert.equal(/0580\/\d{2}\//.test(q.sourceRef), false, `Unexpected fake code in ${q.sourceRef}`);
+      assert.equal(
+        evaluateStudentAnswer(q.correctAnswer, q),
+        true,
+        `Generated question ${q.id} (${q.topicId}) failed self-check for answer ${q.correctAnswer}`
+      );
+      if (q.questionType === 'mcq') {
+        assert.ok(q.options && q.options.length === 4, `Expected 4 options on ${q.id}`);
+        assert.ok(
+          q.options.includes(q.correctAnswer),
+          `Correct answer "${q.correctAnswer}" missing from options ${JSON.stringify(q.options)} on ${q.id}`
+        );
+      }
+    }
+
+    // Attempt 2 questions must differ from Attempt 1
+    const sig1 = new Set(attempt1.signatures);
+    const sig2 = new Set(attempt2.signatures);
+    const overlap12 = [...sig2].filter((s) => sig1.has(s));
+    assert.ok(
+      overlap12.length < attempt1.questions.length,
+      `Retry attempt 2 for ${mode} should differ from attempt 1`
+    );
+  }
+
+  // Full assessment contains both MCQ and written/numeric questions
+  const full = generateMockExamQuestions({ mode: 'mock-full', attemptNumber: 1 });
+  const types = new Set(full.questions.map((q) => q.questionType));
+  assert.ok(types.has('mcq'), 'Full mock should contain MCQ questions');
+  assert.ok(types.has('numeric'), 'Full mock should contain numeric questions');
+  assert.ok(types.has('text'), 'Full mock should contain exact text/fraction questions');
+});
+
+
+
