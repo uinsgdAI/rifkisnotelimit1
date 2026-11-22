@@ -282,3 +282,22 @@ export function renderStrokesToCanvas(
     ctx.restore();
   }
 }
+
+export function hasPdfHeader(bytes: Uint8Array): boolean {
+  if (bytes.length < 5) return false;
+  const limit = Math.min(bytes.length - 4, 1024);
+  for (let i = 0; i < limit; i++) {
+    // Check for ASCII "%PDF-" (0x25, 0x50, 0x44, 0x46, 0x2D)
+    if (
+      bytes[i] === 0x25 &&
+      bytes[i + 1] === 0x50 &&
+      bytes[i + 2] === 0x44 &&
+      bytes[i + 3] === 0x46 &&
+      bytes[i + 4] === 0x2d
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+

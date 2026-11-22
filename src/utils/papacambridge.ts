@@ -11,27 +11,54 @@ function buildFallbackSessions(): PastPaperSession[] {
   ];
 
   for (let year = 2025; year >= 2002; year -= 1) {
+    if (year === 2002) {
+      // Oct/Nov 2002 is the earliest session available in PapaCambridge's 0580 archive
+      list.push({
+        slug: '2002-nov',
+        label: 'Oct / Nov 2002',
+        year: 2002,
+        series: 'Oct/Nov',
+        url: `${PAPACAMBRIDGE_BASE}${SUBJECT_PATH}-2002-nov`,
+      });
+      continue;
+    }
+
+    const useShortSlugs = year <= 2017;
+    const novSlug = useShortSlugs ? `${year}-nov` : `${year}-oct-nov`;
+    const junSlug =
+      year === 2020
+        ? 'may-june-2020'
+        : useShortSlugs
+          ? `${year}-jun`
+          : `${year}-may-june`;
+    const marSlug =
+      year === 2022
+        ? '2022-feb-march'
+        : useShortSlugs
+          ? `${year}-mar`
+          : `${year}-march`;
+
     list.push({
-      slug: `${year}-oct-nov`,
+      slug: novSlug,
       label: `Oct / Nov ${year}`,
       year,
       series: 'Oct/Nov',
-      url: `${PAPACAMBRIDGE_BASE}${SUBJECT_PATH}-${year}-oct-nov`,
+      url: `${PAPACAMBRIDGE_BASE}${SUBJECT_PATH}-${novSlug}`,
     });
     list.push({
-      slug: `${year}-may-june`,
+      slug: junSlug,
       label: `May / June ${year}`,
       year,
       series: 'May/June',
-      url: `${PAPACAMBRIDGE_BASE}${SUBJECT_PATH}-${year}-may-june`,
+      url: `${PAPACAMBRIDGE_BASE}${SUBJECT_PATH}-${junSlug}`,
     });
     if (year >= 2016) {
       list.push({
-        slug: `${year}-march`,
+        slug: marSlug,
         label: `Feb / March ${year}`,
         year,
         series: 'March',
-        url: `${PAPACAMBRIDGE_BASE}${SUBJECT_PATH}-${year}-march`,
+        url: `${PAPACAMBRIDGE_BASE}${SUBJECT_PATH}-${marSlug}`,
       });
     }
   }
@@ -153,7 +180,7 @@ export function parseSessionsFromHtml(html: string): PastPaperSession[] {
     if (
       slug.includes('syllabus') ||
       slug.includes('timetable') ||
-      !/^\d{4}-(may-june|oct-nov|march|feb-march|jun|nov|mar|specimen)/.test(slug)
+      !/^(?:\d{4}-(may-june|oct-nov|march|feb-march|jun|nov|mar|specimen)|may-june-\d{4})$/.test(slug)
     ) {
       continue;
     }

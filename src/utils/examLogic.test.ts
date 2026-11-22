@@ -26,6 +26,7 @@ import {
   countTotalStrokes,
   createInitialAnnotationHistory,
   eraseStrokesNearPoint,
+  hasPdfHeader,
   normalizePointerToPage,
   parseAnnotationsJson,
   pushAnnotationHistory,
@@ -371,10 +372,12 @@ test('PapaCambridge utilities parse HTML sessions/papers, enforce safe PDF URLs,
     resolvePdfIframeUrl(samplePdf, { apiProxyAvailable: false, viewerMode: 'proxy' }),
     `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(samplePdf)}`
   );
-  assert.ok(FALLBACK_SESSIONS.some((s) => s.slug === '2002-may-june'));
-  assert.ok(FALLBACK_SESSIONS.some((s) => s.slug === '2002-oct-nov'));
+  assert.equal(FALLBACK_SESSIONS.some((s) => s.slug === '2002-may-june'), false);
+  assert.ok(FALLBACK_SESSIONS.some((s) => s.slug === '2002-nov'));
+  assert.ok(FALLBACK_SESSIONS.some((s) => s.slug === '2010-jun'));
+  assert.ok(FALLBACK_SESSIONS.some((s) => s.slug === 'may-june-2020'));
   assert.ok(FALLBACK_SESSIONS.some((s) => s.slug === '2026-may-june'));
-  const pre2010 = generateSessionPaperFallback('2005-may-june');
+  const pre2010 = generateSessionPaperFallback('2005-jun');
   assert.ok(pre2010.some((p) => p.filename === '0580_s05_qp_1.pdf' && p.variant === '-'));
   assert.ok(pre2010.some((p) => p.filename === '0580_s05_ms_4.pdf' && p.variant === '-'));
   assert.ok(pre2010.some((p) => p.filename === '0580_s05_er.pdf'));
@@ -489,7 +492,13 @@ test('PDF annotation helpers normalize coordinates, erase hit strokes, and handl
   const roundtrip = parseAnnotationsJson(JSON.stringify(hist.present));
   assert.equal(countTotalStrokes(roundtrip), 2);
   assert.deepEqual(parseAnnotationsJson('{not-valid-json'), {});
+
+  // PDF magic header validation
+  assert.equal(hasPdfHeader(new TextEncoder().encode('%PDF-1.4\n%...')), true);
+  assert.equal(hasPdfHeader(new TextEncoder().encode('<!DOCTYPE html><html>')), false);
+  assert.equal(hasPdfHeader(new Uint8Array([1, 2, 3])), false);
 });
+
 
 
 

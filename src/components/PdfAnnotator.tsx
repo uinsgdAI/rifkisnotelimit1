@@ -19,6 +19,7 @@ import {
   countTotalStrokes,
   createInitialAnnotationHistory,
   eraseStrokesNearPoint,
+  hasPdfHeader,
   loadPaperAnnotations,
   normalizePointerToPage,
   pushAnnotationHistory,
@@ -36,6 +37,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
 interface PdfAnnotatorProps {
   sourceUrl: string;
+  externalUrl?: string;
   paperKey: string;
   paperTitle: string;
   heightClass?: string;
@@ -286,6 +288,7 @@ const PdfPageCanvas: React.FC<PdfPageCanvasProps> = ({
 
 export const PdfAnnotator: React.FC<PdfAnnotatorProps> = ({
   sourceUrl,
+  externalUrl,
   paperKey,
   paperTitle,
   heightClass = 'h-[620px]',
@@ -325,40 +328,84 @@ export const PdfAnnotator: React.FC<PdfAnnotatorProps> = ({
     savePaperAnnotations(paperKey, history.present);
   }, [paperKey, history.present]);
 
-  // Load PDF document via pdfjs-dist
+  // Fetch PDF bytes first (with same-origin cookies & %PDF- validation) then load into pdfjs-dist
   useEffect(() => {
     let cancelled = false;
+    const abortController = new AbortController();
+    let activeLoadTask: pdfjsLib.PDFDocumentLoadingTask | null = null;
+
     setLoading(true);
     setErrorMsg(null);
     setPdfDoc(null);
 
-    const loadTask = pdfjsLib.getDocument({
-      url: sourceUrl,
-      withCredentials: false,
-    });
+    (async () => {
+      try {
+        const resp = await fetch(sourceUrl, {
+          credentials: 'same-origin',
+          signal: abortController.signal,
+        });
 
-    loadTask.promise
-      .then((doc) => {
+        const contentType = (resp.headers.get('content-type') || '').toLowerCase();
+        if (!resp.ok) {
+          let detail = `HTTP ${resp.status}`;
+          if (contentType.includes('application/json')) {
+            try {
+              const payload = (await resp.json()) as { error?: string };
+              if (payload.error) detail = payload.error;
+            } catch {
+              // ignore JSON parse failure
+            }
+          }
+          throw new Error(detail);
+        }
+
+        const buffer = await resp.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+
+        if (!hasPdfHeader(bytes)) {
+          if (contentType.includes('text/html') && sourceUrl.startsWith('/api/')) {
+            throw new Error(
+              'The PDF proxy endpoint returned an HTML page instead of PDF bytes (the backend proxy may not be running on this host, or the file does not exist on PapaCambridge).'
+            );
+          }
+          throw new Error(
+            `Expected a PDF document (%PDF-), but received ${contentType || 'unknown content'}.`
+          );
+        }
+
+        if (cancelled) return;
+
+        activeLoadTask = pdfjsLib.getDocument({
+          data: bytes,
+          wasmUrl: '/pdfjs/wasm/',
+          standardFontDataUrl: '/pdfjs/standard_fonts/',
+        });
+        const doc = await activeLoadTask.promise;
         if (cancelled) {
-          void loadTask.destroy().catch(() => undefined);
+          void activeLoadTask.destroy().catch(() => undefined);
           return;
         }
         setPdfDoc(doc);
         setNumPages(doc.numPages);
-      })
-      .catch(() => {
-        if (cancelled) return;
+      } catch (err) {
+        if (cancelled || (err instanceof DOMException && err.name === 'AbortError')) {
+          return;
+        }
+        const reason = err instanceof Error && err.message ? err.message : 'Unable to fetch or parse PDF bytes.';
         setErrorMsg(
-          'Could not load PDF bytes for canvas annotation. You can switch to Native PDF / Web Viewer, or upload a local PDF file to scribble on offline.'
+          `Could not load PDF bytes for canvas annotation (${reason}). You can switch to Web Viewer, open the PDF directly, or upload a local PDF file to scribble on offline.`
         );
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;
-      void loadTask.destroy().catch(() => undefined);
+      abortController.abort();
+      if (activeLoadTask) {
+        void activeLoadTask.destroy().catch(() => undefined);
+      }
     };
   }, [sourceUrl]);
 
@@ -640,15 +687,27 @@ export const PdfAnnotator: React.FC<PdfAnnotatorProps> = ({
         {!loading && errorMsg && (
           <div className="max-w-lg mx-auto my-12 p-5 bg-white border border-slate-200 rounded-xl text-center space-y-3">
             <p className="text-sm text-slate-700 leading-relaxed">{errorMsg}</p>
-            {onFallbackViewer && (
-              <button
-                type="button"
-                onClick={onFallbackViewer}
-                className="px-3.5 py-2 text-xs font-semibold bg-blue-700 hover:bg-blue-800 text-white rounded-lg cursor-pointer"
-              >
-                Switch to Web / Native Viewer
-              </button>
-            )}
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              {onFallbackViewer && (
+                <button
+                  type="button"
+                  onClick={onFallbackViewer}
+                  className="px-3.5 py-2 text-xs font-semibold bg-blue-700 hover:bg-blue-800 text-white rounded-lg cursor-pointer"
+                >
+                  Switch to Web Viewer
+                </button>
+              )}
+              {externalUrl && (
+                <a
+                  href={externalUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3.5 py-2 text-xs font-semibold border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 rounded-lg"
+                >
+                  Open PDF Directly
+                </a>
+              )}
+            </div>
           </div>
         )}
 

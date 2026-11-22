@@ -101,6 +101,17 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
 
   useEffect(() => {
     let cancelled = false;
+    fetchJsonSafe<{ ok?: boolean }>('/api/health')
+      .then((h) => {
+        if (cancelled) return;
+        if (h?.ok) setApiProxyAvailable(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setApiProxyAvailable(false);
+        setViewerMode((prev) => (prev === 'annotate' ? 'web' : prev));
+      });
+
     setLoadingSessions(true);
     fetchJsonSafe<{ sessions?: PastPaperSession[] }>('/api/papacambridge/sessions')
       .then((data) => {
@@ -613,18 +624,20 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
                   aria-label="PDF viewer engine"
                   className="inline-flex p-0.5 bg-slate-200/80 rounded-lg"
                 >
-                  <button
-                    type="button"
-                    onClick={() => setViewerMode('annotate')}
-                    className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md cursor-pointer ${
-                      viewerMode === 'annotate'
-                        ? 'bg-white text-slate-900 shadow-xs'
-                        : 'text-slate-600'
-                    }`}
-                  >
-                    <Pen className="w-3 h-3" />
-                    Annotate (Draw)
-                  </button>
+                  {apiProxyAvailable && (
+                    <button
+                      type="button"
+                      onClick={() => setViewerMode('annotate')}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md cursor-pointer ${
+                        viewerMode === 'annotate'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600'
+                      }`}
+                    >
+                      <Pen className="w-3 h-3" />
+                      Annotate (Draw)
+                    </button>
+                  )}
                   {apiProxyAvailable && (
                     <button
                       type="button"
@@ -719,6 +732,7 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
               ) : activePrimaryPdf && viewerMode === 'annotate' ? (
                 <PdfAnnotator
                   sourceUrl={pdfBytesUrl(activePrimaryPdf)}
+                  externalUrl={activePrimaryPdf.url}
                   paperKey={activePrimaryPdf.filename}
                   paperTitle={activePrimaryPdf.filename}
                   onFallbackViewer={() => setViewerMode('web')}
@@ -748,6 +762,7 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
                 {viewerMode === 'annotate' ? (
                   <PdfAnnotator
                     sourceUrl={pdfBytesUrl(activeSecondaryPdf)}
+                    externalUrl={activeSecondaryPdf.url}
                     paperKey={activeSecondaryPdf.filename}
                     paperTitle={activeSecondaryPdf.filename}
                     initialPenColorHex="#dc2626"
