@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   BookOpen,
@@ -6,9 +6,10 @@ import {
   Columns2,
   Download,
   ExternalLink,
-  FileText,
   Loader2,
+  Pen,
   Search,
+  Upload,
   X,
 } from 'lucide-react';
 import { ALL_SUBTOPICS_0580, SYLLABUS_0580 } from '../data/syllabus0580';
@@ -20,6 +21,7 @@ import {
   resolvePdfIframeUrl,
 } from '../utils/papacambridge';
 import { MathText } from './MathText';
+import { PdfAnnotator } from './PdfAnnotator';
 
 interface PastPapersViewProps {
   initialSessionSlug?: string;
@@ -79,13 +81,23 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [loadingPapers, setLoadingPapers] = useState(true);
   const [apiProxyAvailable, setApiProxyAvailable] = useState(false);
-  const [viewerMode, setViewerMode] = useState<'proxy' | 'web'>('proxy');
+  const [viewerMode, setViewerMode] = useState<'annotate' | 'proxy' | 'web'>('annotate');
+  const [localPdf, setLocalPdf] = useState<{ url: string; filename: string } | null>(null);
+  const localFileInputRef = useRef<HTMLInputElement | null>(null);
   const [eraFilter, setEraFilter] = useState<'all' | '2020-2026' | '2010-2019' | '2002-2009'>('all');
   const [paperFilter, setPaperFilter] = useState<'all' | '1' | '2' | '3' | '4'>('all');
   const [docFilter, setDocFilter] = useState<'all' | 'QP' | 'MS' | 'ER' | 'GT'>('all');
   const [activePrimaryPdf, setActivePrimaryPdf] = useState<PastPaperFile | null>(null);
   const [activeSecondaryPdf, setActiveSecondaryPdf] = useState<PastPaperFile | null>(null);
   const [topicQuery, setTopicQuery] = useState('');
+
+  useEffect(() => {
+    return () => {
+      if (localPdf?.url) {
+        URL.revokeObjectURL(localPdf.url);
+      }
+    };
+  }, [localPdf]);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,6 +120,7 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
       .catch(() => {
         if (cancelled) return;
         setApiProxyAvailable(false);
+        setViewerMode((prev) => (prev === 'annotate' ? 'web' : prev));
         setSessions(FALLBACK_SESSIONS);
       })
       .finally(() => {
@@ -233,18 +246,37 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
   };
 
   const openSplitView = (qp: PastPaperFile) => {
+    if (localPdf) setLocalPdf(null);
     setActivePrimaryPdf(qp);
     const ms = findMatchingMarkScheme(qp);
     setActiveSecondaryPdf(ms || null);
+    if (apiProxyAvailable) {
+      setViewerMode('annotate');
+    }
   };
 
+  const handleOpenLocalPdf = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const blobUrl = URL.createObjectURL(file);
+    setLocalPdf({ url: blobUrl, filename: file.name });
+    setActivePrimaryPdf(null);
+    setActiveSecondaryPdf(null);
+    setViewerMode('annotate');
+    e.target.value = '';
+  };
+
+  const pdfBytesUrl = (file: PastPaperFile) =>
+    `/api/papacambridge/pdf?url=${encodeURIComponent(file.url)}`;
+
   const pdfDownloadUrl = (file: PastPaperFile) =>
-    apiProxyAvailable
-      ? `/api/papacambridge/pdf?url=${encodeURIComponent(file.url)}`
-      : file.url;
+    apiProxyAvailable ? pdfBytesUrl(file) : file.url;
 
   const pdfIframeUrl = (file: PastPaperFile) =>
-    resolvePdfIframeUrl(file.url, { apiProxyAvailable, viewerMode });
+    resolvePdfIframeUrl(file.url, {
+      apiProxyAvailable,
+      viewerMode: viewerMode === 'web' ? 'web' : 'proxy',
+    });
 
   const topicMatches = useMemo(
     () => findMatchingSyllabusTopics(topicQuery, SYLLABUS_0580, 6),
@@ -371,8 +403,25 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
           </div>
         </div>
 
-        <div className="text-xs font-mono tabular-nums text-slate-500">
-          {filteredPapers.length} files available
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            ref={localFileInputRef}
+            type="file"
+            accept="application/pdf"
+            onChange={handleOpenLocalPdf}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => localFileInputRef.current?.click()}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-slate-200 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-800 cursor-pointer whitespace-nowrap"
+          >
+            <Upload className="w-3.5 h-3.5 text-blue-700" />
+            Annotate Local PDF
+          </button>
+          <div className="text-xs font-mono tabular-nums text-slate-500">
+            {filteredPapers.length} files available
+          </div>
         </div>
       </section>
 
@@ -537,15 +586,17 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
         )}
       </section>
 
-      {/* Split-Screen PDF Viewer when active */}
-      {activePrimaryPdf && (
+      {/* Split-Screen PDF Viewer & Annotator when active */}
+      {(activePrimaryPdf || localPdf) && (
         <section
           aria-label="Past Paper Document Viewer"
           className="bg-white border border-slate-200 rounded-xl overflow-hidden"
         >
           <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3 text-xs font-mono text-slate-800">
-              <span className="font-semibold">{activePrimaryPdf.filename}</span>
+              <span className="font-semibold">
+                {localPdf ? localPdf.filename : activePrimaryPdf?.filename}
+              </span>
               {activeSecondaryPdf && (
                 <>
                   <span aria-hidden="true">+</span>
@@ -556,7 +607,7 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
               )}
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {apiProxyAvailable && (
+              {!localPdf && (
                 <div
                   role="group"
                   aria-label="PDF viewer engine"
@@ -564,15 +615,29 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
                 >
                   <button
                     type="button"
-                    onClick={() => setViewerMode('proxy')}
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md cursor-pointer ${
-                      viewerMode === 'proxy'
+                    onClick={() => setViewerMode('annotate')}
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md cursor-pointer ${
+                      viewerMode === 'annotate'
                         ? 'bg-white text-slate-900 shadow-xs'
                         : 'text-slate-600'
                     }`}
                   >
-                    Native PDF
+                    <Pen className="w-3 h-3" />
+                    Annotate (Draw)
                   </button>
+                  {apiProxyAvailable && (
+                    <button
+                      type="button"
+                      onClick={() => setViewerMode('proxy')}
+                      className={`px-2.5 py-1 text-xs font-medium rounded-md cursor-pointer ${
+                        viewerMode === 'proxy'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600'
+                      }`}
+                    >
+                      Native PDF
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setViewerMode('web')}
@@ -586,15 +651,17 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
                   </button>
                 </div>
               )}
-              <a
-                href={activePrimaryPdf.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-700"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                Open QP
-              </a>
+              {activePrimaryPdf && (
+                <a
+                  href={activePrimaryPdf.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-700"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Open QP
+                </a>
+              )}
               {activeSecondaryPdf && (
                 <a
                   href={activeSecondaryPdf.url}
@@ -609,6 +676,7 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
+                  setLocalPdf(null);
                   setActivePrimaryPdf(null);
                   setActiveSecondaryPdf(null);
                 }}
@@ -624,29 +692,48 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
               activeSecondaryPdf ? 'lg:grid-cols-2' : 'grid-cols-1'
             }`}
           >
-            <div className="bg-white">
+            <div className="bg-white min-w-0" data-testid="qp-pane">
               <div className="px-3 py-1.5 text-[11px] font-medium text-slate-500 border-b border-slate-200 flex items-center justify-between gap-2">
                 <span>
-                  {activePrimaryPdf.docTypeLabel} — {activePrimaryPdf.filename}
+                  {localPdf
+                    ? `Local PDF Annotation — ${localPdf.filename}`
+                    : `${activePrimaryPdf?.docTypeLabel} — ${activePrimaryPdf?.filename}`}
                 </span>
-                <a
-                  href={activePrimaryPdf.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-700 hover:underline shrink-0"
-                >
-                  Open in new tab
-                </a>
+                {activePrimaryPdf && (
+                  <a
+                    href={activePrimaryPdf.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-700 hover:underline shrink-0"
+                  >
+                    Open in new tab
+                  </a>
+                )}
               </div>
-              <iframe
-                title={activePrimaryPdf.filename}
-                src={pdfIframeUrl(activePrimaryPdf)}
-                className="w-full h-[640px] border-0 bg-slate-50"
-              />
+              {localPdf ? (
+                <PdfAnnotator
+                  sourceUrl={localPdf.url}
+                  paperKey={`local:${localPdf.filename}`}
+                  paperTitle={localPdf.filename}
+                />
+              ) : activePrimaryPdf && viewerMode === 'annotate' ? (
+                <PdfAnnotator
+                  sourceUrl={pdfBytesUrl(activePrimaryPdf)}
+                  paperKey={activePrimaryPdf.filename}
+                  paperTitle={activePrimaryPdf.filename}
+                  onFallbackViewer={() => setViewerMode('web')}
+                />
+              ) : activePrimaryPdf ? (
+                <iframe
+                  title={activePrimaryPdf.filename}
+                  src={pdfIframeUrl(activePrimaryPdf)}
+                  className="w-full h-[640px] border-0 bg-slate-50"
+                />
+              ) : null}
             </div>
 
             {activeSecondaryPdf && (
-              <div className="bg-white">
+              <div className="bg-white min-w-0" data-testid="ms-pane">
                 <div className="px-3 py-1.5 text-[11px] font-medium text-emerald-700 border-b border-slate-200 flex items-center justify-between gap-2">
                   <span>Mark Scheme — {activeSecondaryPdf.filename}</span>
                   <a
@@ -658,11 +745,21 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
                     Open in new tab
                   </a>
                 </div>
-                <iframe
-                  title={activeSecondaryPdf.filename}
-                  src={pdfIframeUrl(activeSecondaryPdf)}
-                  className="w-full h-[640px] border-0 bg-slate-50"
-                />
+                {viewerMode === 'annotate' ? (
+                  <PdfAnnotator
+                    sourceUrl={pdfBytesUrl(activeSecondaryPdf)}
+                    paperKey={activeSecondaryPdf.filename}
+                    paperTitle={activeSecondaryPdf.filename}
+                    initialPenColorHex="#dc2626"
+                    onFallbackViewer={() => setViewerMode('web')}
+                  />
+                ) : (
+                  <iframe
+                    title={activeSecondaryPdf.filename}
+                    src={pdfIframeUrl(activeSecondaryPdf)}
+                    className="w-full h-[640px] border-0 bg-slate-50"
+                  />
+                )}
               </div>
             )}
           </div>
@@ -732,13 +829,17 @@ export const PastPapersView: React.FC<PastPapersViewProps> = ({
                           <button
                             type="button"
                             onClick={() => {
+                              setLocalPdf(null);
                               setActivePrimaryPdf(file);
                               setActiveSecondaryPdf(null);
+                              if (apiProxyAvailable) {
+                                setViewerMode('annotate');
+                              }
                             }}
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium border border-slate-200 rounded-lg bg-white hover:bg-slate-100 text-slate-700 cursor-pointer"
                           >
-                            <FileText className="w-3.5 h-3.5" />
-                            View
+                            <Pen className="w-3.5 h-3.5" />
+                            Annotate
                           </button>
                           {hasMs && (
                             <button

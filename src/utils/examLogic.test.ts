@@ -22,6 +22,17 @@ import {
 import { SYLLABUS_0580, ALL_SUBTOPICS_0580 } from '../data/syllabus0580';
 import { PRACTICE_QUESTION_BANK } from '../data/practiceBank';
 import { generateMockExamQuestions } from './questionGenerator';
+import {
+  countTotalStrokes,
+  createInitialAnnotationHistory,
+  eraseStrokesNearPoint,
+  normalizePointerToPage,
+  parseAnnotationsJson,
+  pushAnnotationHistory,
+  redoAnnotationHistory,
+  undoAnnotationHistory,
+  type AnnotationStroke,
+} from './pdfAnnotations';
 
 test('parseAppRoute handles root /, exact notes/0580/1/1.16, and other routes', () => {
   assert.deepEqual(parseAppRoute('/'), {
@@ -425,6 +436,59 @@ test('generateMockExamQuestions generates valid multi-type papers and avoids rep
   assert.ok(types.has('mcq'), 'Full mock should contain MCQ questions');
   assert.ok(types.has('numeric'), 'Full mock should contain numeric questions');
   assert.ok(types.has('text'), 'Full mock should contain exact text/fraction questions');
+});
+
+test('PDF annotation helpers normalize coordinates, erase hit strokes, and handle undo/redo & JSON parsing', () => {
+  const pt = normalizePointerToPage(350, 200, { left: 100, top: 100, width: 500, height: 400 });
+  assert.deepEqual(pt, { x: 0.5, y: 0.25 });
+
+  const clamped = normalizePointerToPage(50, 700, { left: 100, top: 100, width: 500, height: 400 });
+  assert.deepEqual(clamped, { x: 0, y: 1 });
+
+  const s1: AnnotationStroke = {
+    id: 'stroke-1',
+    tool: 'pen',
+    color: '#1d4ed8',
+    size: 3.5,
+    points: [
+      { x: 0.1, y: 0.1 },
+      { x: 0.4, y: 0.1 },
+    ],
+  };
+  const s2: AnnotationStroke = {
+    id: 'stroke-2',
+    tool: 'highlighter',
+    color: '#facc15',
+    size: 18,
+    points: [
+      { x: 0.8, y: 0.8 },
+      { x: 0.9, y: 0.8 },
+    ],
+  };
+
+  // Erase touches stroke-1 midpoint but preserves stroke-2
+  const erased = eraseStrokesNearPoint([s1, s2], { x: 0.25, y: 0.105 }, 0.02);
+  assert.equal(erased.removedAny, true);
+  assert.equal(erased.remaining.length, 1);
+  assert.equal(erased.remaining[0].id, 'stroke-2');
+
+  // History undo/redo cycle
+  let hist = createInitialAnnotationHistory({});
+  hist = pushAnnotationHistory(hist, { 1: [s1] });
+  hist = pushAnnotationHistory(hist, { 1: [s1, s2] });
+  assert.equal(countTotalStrokes(hist.present), 2);
+
+  hist = undoAnnotationHistory(hist);
+  assert.equal(countTotalStrokes(hist.present), 1);
+  assert.equal(hist.present[1][0].id, 'stroke-1');
+
+  hist = redoAnnotationHistory(hist);
+  assert.equal(countTotalStrokes(hist.present), 2);
+
+  // Serialization & invalid JSON defense
+  const roundtrip = parseAnnotationsJson(JSON.stringify(hist.present));
+  assert.equal(countTotalStrokes(roundtrip), 2);
+  assert.deepEqual(parseAnnotationsJson('{not-valid-json'), {});
 });
 
 
